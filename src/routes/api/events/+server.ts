@@ -1,11 +1,7 @@
 import { error } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import amqp, { type Channel, type Connection, type ConsumeMessage } from 'amqplib';
-import { RABBITMQ_URL } from '$env/static/private';
-
-if (!RABBITMQ_URL) {
-	throw new Error('RABBITMQ_URL environment variable is not set');
-}
+import { env } from '$env/dynamic/private';
 
 // Event history buffer
 const MAX_EVENTS = 50;
@@ -23,7 +19,7 @@ export const GET: RequestHandler = async ({ setHeaders }) => {
 	let channel: Channel | undefined;
 
 	try {
-		connection = await amqp.connect(RABBITMQ_URL);
+		connection = await amqp.connect(env.RABBIT_URL);
 		channel = await connection.createChannel();
 
 		const exchange = 'vatsim.events';
