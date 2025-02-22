@@ -56,6 +56,10 @@
 	// Add a current time state that updates every second
 	let currentTime = $state(Date.now());
 
+	function isValidRating(rating: number): rating is VatsimRating {
+		return rating >= 1 && rating <= 12;
+	}
+
 	function getRegionFromCallsign(callsign: string): string {
 		const prefix = callsign.split('_')[0];
 		// Common VATSIM regions
@@ -94,7 +98,62 @@
 			.sort((a, b) => a.callsign.localeCompare(b.callsign));
 	}
 
+	function getFacilityPrefix(controller: ControllerData): string {
+		const parts = controller.callsign.split('_');
+		return parts[0];
+	}
+
+	function getPositionSuffix(controller: ControllerData): string {
+		const parts = controller.callsign.split('_');
+		const suffix = parts[parts.length - 1];
+
+		switch (suffix) {
+			case 'TWR':
+				return 'Tower';
+			case 'GND':
+				return 'Ground';
+			case 'DEL':
+				return 'Delivery';
+			case 'APP':
+				return 'Approach';
+			case 'DEP':
+				return 'Departure';
+			case 'CTR':
+				return 'Center';
+			case 'FSS':
+				return 'Flight Service';
+			default:
+				return suffix;
+		}
+	}
+
+	function getGroupedControllers(controllers: ControllerData[]): Map<string, ControllerData[]> {
+		const groups = new Map<string, ControllerData[]>();
+
+		for (const controller of controllers) {
+			const facilityPrefix = getFacilityPrefix(controller);
+			if (!groups.has(facilityPrefix)) {
+				groups.set(facilityPrefix, []);
+			}
+			groups.get(facilityPrefix)?.push(controller);
+		}
+
+		// Sort controllers within each group by position type
+		for (const controllers of groups.values()) {
+			controllers.sort((a, b) => {
+				// First sort by the last part of the callsign (position type)
+				const aPosition = a.callsign.split('_').pop() || '';
+				const bPosition = b.callsign.split('_').pop() || '';
+				return aPosition.localeCompare(bPosition);
+			});
+		}
+
+		// Sort groups by size (most controllers first)
+		return new Map([...groups.entries()].sort((a, b) => b[1].length - a[1].length));
+	}
+
 	const filteredControllers = $derived(getFilteredControllers());
+	const groupedControllers = $derived(getGroupedControllers(filteredControllers));
 	const uniqueRegions = $derived(getUniqueRegions());
 
 	function getRatingText(rating: VatsimRating): string {
@@ -147,36 +206,50 @@
 		};
 
 		eventSource.onmessage = (event) => {
-			const data = JSON.parse(event.data);
-			const content = JSON.parse(data.content);
+			try {
+				const data = JSON.parse(event.data);
+				const content = JSON.parse(data.content);
 
-			const newEvent: ControllerEvent = {
-				type: content.event as 'connect' | 'disconnect',
-				data: content.data,
-				timestamp: content.timestamp
-			};
+				// Validate the event data structure
+				if (!content.event || !content.data || !content.timestamp) {
+					return;
+				}
 
-			// Only track events for our facilities
-			const callsign = newEvent.data.callsign.toUpperCase();
-			const prefix = callsign.split('_')[0];
-			// Check for valid airport prefixes or IND_*_CTR patterns
-			const isIndy = validPrefixes.has(prefix) || callsign.match(/^IND_\d+_CTR$/);
+				// Ensure the controller data has required fields
+				if (!content.data.callsign || !content.data.rating || !isValidRating(content.data.rating)) {
+					return;
+				}
 
-			if (isIndy) {
+				// Filter out OBS and 199.998 frequency
+				if (
+					content.data.rating === 1 ||
+					content.data.frequency === '199.998' ||
+					content.data.callsign.includes('_OBS')
+				) {
+					return;
+				}
+
+				const newEvent: ControllerEvent = {
+					type: content.event as 'connect' | 'disconnect',
+					data: {
+						...content.data,
+						rating: content.data.rating as VatsimRating
+					},
+					timestamp: content.timestamp
+				};
+
 				events = [newEvent, ...events.slice(0, 49)];
 				totalEvents++;
 
 				if (newEvent.type === 'connect') {
-					console.log(`Controller connected: ${newEvent.data.callsign}`);
 					activeControllers = new Map(activeControllers).set(newEvent.data.callsign, newEvent.data);
 				} else {
-					console.log(`Controller disconnected: ${newEvent.data.callsign}`);
 					const updatedControllers = new Map(activeControllers);
 					updatedControllers.delete(newEvent.data.callsign);
 					activeControllers = updatedControllers;
 				}
-
-				console.log(`Active controllers: ${activeControllers.size}`);
+			} catch (error) {
+				// Silently handle parsing errors
 			}
 		};
 	}
@@ -215,7 +288,7 @@
 	<div class="mx-auto max-w-7xl">
 		<div class="mb-8 flex items-center justify-between">
 			<div>
-				<h1 class="text-4xl font-bold tracking-tight">Indy Center Activity</h1>
+				<h1 class="text-4xl font-bold tracking-tight">VATSIM Activity</h1>
 				<div class="mt-2 flex items-center gap-3">
 					<div class="flex items-center gap-2">
 						<div
@@ -277,33 +350,50 @@
 						</div>
 					{/if}
 
-					{#each filteredControllers as controller (controller.callsign)}
-						<div
-							in:fade={{ duration: 200 }}
-							class="group relative overflow-hidden rounded-lg bg-gray-800/30 p-3 transition-all hover:bg-gray-800/50"
-						>
-							<div class="flex items-center gap-3">
-								<div class="flex-1">
-									<div class="flex items-baseline gap-2">
-										<span class="font-mono text-lg font-medium">{controller.callsign}</span>
-										<span
-											class="rounded px-1.5 py-0.5 text-xs font-medium {getRatingColor(
-												controller.rating
-											)}"
-										>
-											{getRatingText(controller.rating)}
-										</span>
+					{#each [...groupedControllers] as [facilityPrefix, controllers]}
+						<div class="mb-6">
+							<h3 class="mb-3 text-lg font-semibold text-gray-300">
+								{facilityPrefix}
+								<span class="ml-2 text-sm text-gray-500">({controllers.length} positions)</span>
+							</h3>
+							<div class="grid gap-2">
+								{#each controllers as controller (controller.callsign)}
+									<div
+										in:fade={{ duration: 200 }}
+										class="group relative overflow-hidden rounded-lg bg-gray-800/30 p-3 transition-all hover:bg-gray-800/50"
+									>
+										<div class="flex items-center gap-3">
+											<div class="flex-1">
+												<div class="flex items-baseline gap-2">
+													<span class="font-mono text-lg font-medium">{controller.callsign}</span>
+													<span
+														class="rounded px-1.5 py-0.5 text-xs font-medium {getRatingColor(
+															controller.rating
+														)}"
+													>
+														{getRatingText(controller.rating)}
+													</span>
+													<span class="text-sm text-gray-500">{getPositionSuffix(controller)}</span>
+												</div>
+												<div class="mt-1 flex gap-4 text-sm text-gray-400">
+													<span>{controller.name}</span>
+													<span>{controller.frequency}</span>
+													<span>{controller.server}</span>
+												</div>
+												{#if controller.text_atis}
+													<div class="mt-2 rounded bg-gray-900/50 p-2 text-sm text-gray-300">
+														<div class="font-medium text-gray-400">ATIS</div>
+														<div class="font-mono whitespace-pre-wrap">{controller.text_atis}</div>
+													</div>
+												{/if}
+											</div>
+											<div class="text-right text-sm text-gray-500">
+												<div>Range: {controller.visual_range}nm</div>
+												<div>CID: {controller.cid}</div>
+											</div>
+										</div>
 									</div>
-									<div class="mt-1 flex gap-4 text-sm text-gray-400">
-										<span>{controller.name}</span>
-										<span>{controller.frequency}</span>
-										<span>{controller.server}</span>
-									</div>
-								</div>
-								<div class="text-right text-sm text-gray-500">
-									<div>Range: {controller.visual_range}nm</div>
-									<div>CID: {controller.cid}</div>
-								</div>
+								{/each}
 							</div>
 						</div>
 					{/each}

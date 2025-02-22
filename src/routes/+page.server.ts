@@ -42,30 +42,18 @@ function isValidRating(rating: number): rating is VatsimRating {
 
 export const load: PageServerLoad = async () => {
 	try {
-		// Fetch both VATSIM data and ZID airports in parallel
-		const [vatsimResponse, zidResponse] = await Promise.all([
-			fetch('https://data.vatsim.net/v3/vatsim-data.json'),
-			fetch('https://api.zidartcc.org/v1/airports/zid')
-		]);
+		const response = await fetch('https://data.vatsim.net/v3/vatsim-data.json');
 
-		if (!vatsimResponse.ok) {
-			throw new Error(`Failed to fetch VATSIM data: ${vatsimResponse.statusText}`);
-		}
-		if (!zidResponse.ok) {
-			throw new Error(`Failed to fetch ZID airports: ${zidResponse.statusText}`);
+		if (!response.ok) {
+			throw new Error(`Failed to fetch VATSIM data: ${response.statusText}`);
 		}
 
-		const data: VatsimData = await vatsimResponse.json();
-		const airports: ZidAirport[] = await zidResponse.json();
+		const data: VatsimData = await response.json();
 
 		console.log('Fetched VATSIM data:', {
 			controllers: data.controllers?.length ?? 0,
 			clients: data.general?.connected_clients ?? 0
 		});
-
-		// Get all ICAO identifiers without the K prefix
-		const zidAirports = new Set(airports.map((airport) => airport.icao_id.replace('K', '')));
-		console.log('ZID Airports:', Array.from(zidAirports));
 
 		// Filter and transform controllers data
 		const activeControllers = (data.controllers ?? [])
@@ -80,13 +68,16 @@ export const load: PageServerLoad = async () => {
 					return false;
 				}
 
-				const callsign = controller.callsign.toUpperCase();
-				// Include ZID center positions and IND_*_CTR patterns
-				if (callsign.startsWith('ZID_') || callsign.match(/^IND_\d+_CTR$/)) return true;
+				// Filter out OBS ratings, 199.998 frequency, and _OBS positions
+				if (
+					controller.rating === 1 ||
+					controller.frequency === '199.998' ||
+					controller.callsign.includes('_OBS')
+				) {
+					return false;
+				}
 
-				// For other positions, check if they belong to a ZID airport
-				const facilityPrefix = callsign.split('_')[0];
-				return zidAirports.has(facilityPrefix);
+				return true;
 			})
 			.map((controller) => ({
 				cid: controller.cid,
@@ -106,7 +97,7 @@ export const load: PageServerLoad = async () => {
 
 		return {
 			controllers: activeControllers,
-			airports: Array.from(zidAirports),
+			airports: [],
 			stats: {
 				connected_clients: data.general?.connected_clients ?? 0,
 				unique_users: data.general?.unique_users ?? 0
